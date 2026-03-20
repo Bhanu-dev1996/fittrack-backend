@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from models import User
 from database import SessionLocal, engine, Base
@@ -12,9 +12,17 @@ from utils import (
 from fastapi.security import HTTPBearer
 from fastapi import Security
 from fastapi.responses import HTMLResponse
+from fastapi import UploadFile, File, Request
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import uuid
 
 app = FastAPI()
 security = HTTPBearer()
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads" / "profile"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(BASE_DIR / "uploads")), name="uploads")
 Base.metadata.create_all(bind=engine)
 
 def get_db():
@@ -68,15 +76,20 @@ def login(user: schemas.UserLogin, db: Session = Depends(get_db)):
     }
 
 @app.post("/auth/forgot-password")
-def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(
+    payload: schemas.ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.email == payload.email).first()
 
     # Always return the same message to avoid account enumeration.
     if user:
         raw_token = auth.generate_password_reset_token(db, user)
         reset_link = build_reset_link(raw_token)
-        # send_password_reset_email(user.email, reset_link)
-        print("\n🔗 RESET LINK:", reset_link, "\n")
+
+        # Send email after response is returned (non-blocking for client).
+        background_tasks.add_task(send_password_reset_email, user.email, reset_link)
 
     return {
         "message": "If an account exists for this email, a reset link has been sent."
@@ -217,3 +230,76 @@ def reset_password_page(token: str):
 </body>
 </html>
 """
+
+
+@app.put("/auth/profile")
+def update_profile(
+    payload: schemas.ProfileUpdate,
+    user_email: str = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.email == user_email).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing and existing.id != user.id:
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    updated_user = auth.update_user_profile(
+        db,
+        user,
+        payload.name,
+        payload.email,
+        payload.age,
+        payload.height,
+        payload.weight,
+        payload.goal,
+    )
+
+    return {
+    "profile": {
+        "name": updated_user.name,
+        "email": updated_user.email,
+        "age": updated_user.age,
+        "height": updated_user.height,
+        "weight": updated_user.weight,
+        "goal": updated_user.goal,
+    },
+    "access_token": create_access_token({"sub": updated_user.email}),
+    "token_type": "bearer",
+    "profile_image_url": user.profile_image_path,
+}
+
+@app.post("/auth/profile/image")
+async def upload_profile_image(
+    request: Request,
+    image: UploadFile = File(...),
+    user_email: str = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.email == user_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    allowed = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+    if image.content_type not in allowed:
+        raise HTTPException(status_code=400, detail="Only JPG, PNG, WEBP allowed")
+
+    data = await image.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 5MB)")
+
+    ext = allowed[image.content_type]
+    filename = f"user_{user.id}_{uuid.uuid4().hex}{ext}"
+    target = UPLOAD_DIR / filename
+    target.write_bytes(data)
+
+    user.profile_image_path = f"/uploads/profile/{filename}"
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "profile_image_url": str(request.base_url).rstrip("/") + user.profile_image_path
+    }

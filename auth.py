@@ -76,3 +76,15 @@ def update_password_from_reset(db: Session, user: User, new_password: str):
     user.reset_token_hash = None
     user.reset_token_expires_at = None
     db.commit()
+
+
+def update_user_profile(db: Session, user: User, name: str, email: str, age: int, height: float, weight: float, goal: str):
+    user.name = name
+    user.email = email
+    user.age = age
+    user.height = height
+    user.weight = weight
+    user.goal = goal
+    db.commit()
+    db.refresh(user)
+    return user    

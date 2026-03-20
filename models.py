@@ -12,6 +12,7 @@ class User(Base):
     height = Column(Float)
     weight = Column(Float)
     goal = Column(String)
+    profile_image_path = Column(String, nullable=True)
 
     reset_token_hash = Column(String, nullable=True, index=True)
     reset_token_expires_at = Column(DateTime, nullable=True)
